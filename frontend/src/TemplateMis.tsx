@@ -1,48 +1,258 @@
-import { useEffect, useState } from 'react'
-import { API_BASE, visitApi } from './hooks/useVisitWorkspace'
-import { normalizeFields } from './lib/api'
-import type { TemplateValues, TemplateVitals } from './lib/visitTemplate'
-import { VITAL_DEFINITIONS } from './lib/visitTemplate'
+import { useEffect, useRef, useState } from "react";
+import { CheckCheck, Info, LoaderCircle, Send, X } from "lucide-react";
+import { visitApi } from "./hooks/useVisitWorkspace";
+import { getErrorMessage, type MisReceipt, type MisSettings } from "./lib/api";
+import { createMisDelivery } from "./lib/mis";
+import {
+  FIELD_DEFINITIONS,
+  type TemplateValues,
+  type TemplateVitals,
+} from "./lib/visitTemplate";
 
-async function request(path: string, body?: unknown, method = 'POST') {
-  const response = await fetch(`${API_BASE}${path}`, {method: body === undefined ? 'GET' : method, cache:'no-store', headers:{'Content-Type':'application/json'}, ...(body === undefined ? {} : {body:JSON.stringify(body)})})
-  const value = await response.json()
-  if (!response.ok) throw new Error(value.error?.message || 'МИС не ответила.')
-  return value
-}
-export function TemplateMis({values, vitals, reviewed, locked}:{values:TemplateValues; vitals:TemplateVitals; reviewed:boolean; locked:boolean}) {
-  const [settings,setSettings] = useState<{api_key_configured:boolean; destination:string}|null>(null)
-  const [test,setTest] = useState(false)
-  const [busy,setBusy] = useState(false)
-  const [message,setMessage] = useState('')
-  const [receipt,setReceipt] = useState<{document_id:string; revision:number; snapshot:string}|null>(null)
-  const [document,setDocument] = useState<Record<string,string>|null>(null)
-  const fingerprint = JSON.stringify([values,vitals])
-  useEffect(() => { void request('/integrations/mis/settings').then(setSettings).catch(() => {}) }, [])
-  async function act(fn:()=>Promise<void>) {setBusy(true);setMessage('');try {await fn()} catch(e){setMessage(e instanceof Error ? e.message : 'Ошибка МИС')}finally{setBusy(false)}}
-  return <section className="template-mis" aria-label="Подтверждение и отправка в МИС"><details><summary>Тестовая МИС · настройки подключения</summary>
-    <p>Получатель: {settings?.destination || 'не настроен'}. Ключ: {settings?.api_key_configured ? 'на сервере, скрыт' : 'не настроен'}.</p>
-    <p>Пациент А — вымышленный. В тестовую базу передаётся проверенный бланк. Аудио и полная расшифровка не отправляются.</p>
-    <button className="button secondary" disabled={busy} onClick={()=>void act(async()=>{await request('/integrations/mis/check',{});setMessage('МИС приняла API-ключ. Подключение проверено.')})}>Проверить API-ключ МИС</button></details>
-    <label><input type="checkbox" checked={test} onChange={e=>setTest(e.target.checked)} />Только тестовые данные, разрешаю сохранить бланк в тестовой МИС</label>
-    <button className="button primary full-width" disabled={busy || locked || !reviewed || !test || receipt?.snapshot === fingerprint} onClick={()=>void act(async()=>{
-      const snapshot = fingerprint
-      const fields = {...values}
-      fields.objective_status = [VITAL_DEFINITIONS.filter(v=>vitals[v.id]).map(v=>`${v.label}: ${vitals[v.id]} ${v.unit}`).join('; '),fields.objective_status].filter(Boolean).join('\n')
-      // Isolated export snapshot cannot race with the automatic LLM worker.
-      let ws = await visitApi.create()
-      try {
-        ws = await request(`/workspaces/${ws.id}/form`, {expected_revision:ws.revision,document_fields:fields,fields:normalizeFields({
-          complaints:fields.complaints,anamnesis:[fields.illness_history,fields.life_history,fields.gynecological_history,fields.anemia_history,fields.epidemiological_history,fields.objective_status,fields.laboratory_results].filter(Boolean).join('\n'),
-          allergies:fields.allergies,diagnosis:fields.diagnosis,prescriptions:[fields.examination_plan,fields.treatment].filter(Boolean).join('\n'),recommendations:fields.recommendations,
-        })},'PATCH')
-        ws = await request(`/workspaces/${ws.id}/confirm`,{expected_revision:ws.revision})
-        const result = await request(`/workspaces/${ws.id}/mis-export`,{expected_revision:ws.revision,patient_id:'demo-patient-001',synthetic_data_confirmed:true})
-        setReceipt({...result,snapshot});setDocument(null);setMessage('Тестовая МИС сохранила бланк. Квитанция получена.')
-      } finally {await visitApi.remove(ws.id).catch(()=>{})}
-    })}>{busy?'Отправка…':receipt?.snapshot === fingerprint?'Отправлено в МИС':'Подтвердить и отправить в МИС'}</button>
-    {message && <p role="status">{message}</p>}
-    {receipt && <><p>Документ: {receipt.document_id}</p>{receipt.snapshot !== fingerprint && <p>Бланк изменён после отправки. Эта квитанция относится к предыдущему тексту.</p>}<button className="text-button" onClick={()=>void act(async()=>{const result=await request(`/integrations/mis/documents/${receipt.document_id}`);setDocument(result.document.document_fields)})}>Прочитать бланк из базы МИС</button></>}
-    {document && <details open><summary>Бланк, прочитанный из базы МИС</summary><pre>{JSON.stringify(document,null,2)}</pre></details>}
-  </section>
+export function TemplateMis({
+  values,
+  vitals,
+  reviewed,
+  locked,
+  onBusy,
+}: {
+  values: TemplateValues;
+  vitals: TemplateVitals;
+  reviewed: boolean;
+  locked: boolean;
+  onBusy: (busy: boolean) => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [open, setOpen] = useState(false);
+  const [settings, setSettings] = useState<MisSettings | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [receipt, setReceipt] = useState<
+    (MisReceipt & { snapshot: string }) | null
+  >(null);
+  const [stored, setStored] = useState<Record<string, string> | null>(null);
+  const delivery = useRef(createMisDelivery(visitApi));
+  const request = useRef<AbortController | null>(null);
+  const busyRef = useRef(false);
+  const fingerprint = JSON.stringify([values, vitals]);
+  const sent = receipt?.snapshot === fingerprint;
+
+  useEffect(
+    () => () => {
+      request.current?.abort();
+      delivery.current.dispose();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!open) return;
+    dialog.current?.showModal();
+    const abort = new AbortController();
+    setChecking(true);
+    setError("");
+    void visitApi
+      .misSettings({ signal: abort.signal, timeoutMs: 8000 })
+      .then((value) => {
+        if (!abort.signal.aborted) setSettings(value);
+      })
+      .catch((reason) => {
+        if (!abort.signal.aborted) setError(getErrorMessage(reason));
+      })
+      .finally(() => {
+        if (!abort.signal.aborted) setChecking(false);
+      });
+    return () => abort.abort();
+  }, [open]);
+  function close() {
+    if (!busyRef.current) {
+      setOpen(false);
+      setConfirmed(false);
+    }
+  }
+  async function send() {
+    if (
+      busyRef.current ||
+      !reviewed ||
+      locked ||
+      !confirmed ||
+      !settings?.configured
+    )
+      return;
+    busyRef.current = true;
+    setBusy(true);
+    onBusy(true);
+    setError("");
+    const controller = new AbortController();
+    request.current = controller;
+    try {
+      const result = await delivery.current.send(values, vitals, confirmed, {
+        signal: controller.signal,
+        timeoutMs: 20000,
+      });
+      if (!controller.signal.aborted) {
+        setReceipt({ ...result, snapshot: fingerprint });
+        setStored(null);
+      }
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(getErrorMessage(reason));
+    } finally {
+      busyRef.current = false;
+      if (!controller.signal.aborted) {
+        setBusy(false);
+        onBusy(false);
+      }
+    }
+  }
+  async function readBack() {
+    if (!receipt || busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError("");
+    const controller = new AbortController();
+    request.current = controller;
+    try {
+      const result = await visitApi.misDocument(receipt.document_id, {
+        signal: controller.signal,
+        timeoutMs: 15000,
+      });
+      if (!controller.signal.aborted)
+        setStored(result.document.document_fields);
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(getErrorMessage(reason));
+    } finally {
+      busyRef.current = false;
+      if (!controller.signal.aborted) setBusy(false);
+    }
+  }
+  return (
+    <>
+      <button
+        className="button primary"
+        disabled={!reviewed || locked || busy}
+        onClick={() => setOpen(true)}
+      >
+        {sent ? <CheckCheck size={17} /> : <Send size={17} />}
+        {sent ? "Отправлено в МИС" : "Отправить в МИС"}
+      </button>
+      {open && (
+        <dialog
+          ref={dialog}
+          className="modal mis-dialog"
+          onCancel={(event) => {
+            event.preventDefault();
+            close();
+          }}
+        >
+          <header>
+            <h2>{sent ? "Бланк в тестовой МИС" : "Отправка в тестовую МИС"}</h2>
+            <button
+              className="icon-button"
+              aria-label="Закрыть окно МИС"
+              disabled={busy}
+              onClick={close}
+            >
+              <X size={20} />
+            </button>
+          </header>
+          {sent ? (
+            <>
+              <div className="mis-result">
+                <CheckCheck size={32} />
+                <p>
+                  Получение подтверждено.
+                  <br />
+                  <small>Документ: {receipt.document_id}</small>
+                </p>
+              </div>
+              <button
+                className="text-button"
+                disabled={busy}
+                onClick={() => void readBack()}
+              >
+                {busy ? "Проверяем…" : "Прочитать из МИС"}
+              </button>
+              {stored && (
+                <details className="mis-stored" open>
+                  <summary>Сохранённый бланк</summary>
+                  {FIELD_DEFINITIONS.filter((field) => stored[field.id]).map(
+                    (field) => (
+                      <p key={field.id}>
+                        <strong>{field.label}</strong>
+                        <br />
+                        {stored[field.id]}
+                      </p>
+                    ),
+                  )}
+                </details>
+              )}
+            </>
+          ) : (
+            <>
+              <p className="modal-intro">
+                Проверенный бланк будет сохранён в тестовую карточку «Пациент
+                А».
+              </p>
+              {checking ? (
+                <p className="mis-status">
+                  <LoaderCircle size={16} className="spin" />
+                  Проверяем подключение…
+                </p>
+              ) : settings && !settings.configured ? (
+                <p className="mis-status">
+                  <Info size={16} />
+                  МИС пока не подключена. Скачайте бланк в Word.
+                </p>
+              ) : null}
+              <label className="mis-confirm">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  disabled={busy}
+                  onChange={(event) => setConfirmed(event.target.checked)}
+                />
+                Подтверждаю: данные вымышленные
+              </label>
+            </>
+          )}
+          {error && (
+            <p className="ai-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="modal-actions">
+            <button
+              className="button secondary"
+              onClick={close}
+              disabled={busy}
+            >
+              {sent ? "Готово" : "Отмена"}
+            </button>
+            {!sent && (
+              <button
+                className="button primary"
+                disabled={
+                  !confirmed ||
+                  !reviewed ||
+                  locked ||
+                  busy ||
+                  checking ||
+                  !settings?.configured
+                }
+                onClick={() => void send()}
+              >
+                {busy ? (
+                  <LoaderCircle size={17} className="spin" />
+                ) : (
+                  <Send size={17} />
+                )}
+                {busy ? "Отправляем…" : "Отправить"}
+              </button>
+            )}
+          </div>
+        </dialog>
+      )}
+    </>
+  );
 }
