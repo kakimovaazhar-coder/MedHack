@@ -28,8 +28,16 @@ WorkflowDep = Annotated[Workflow, Depends(workflow)]
 
 @router.get("/health", response_model=Health, tags=["system"])
 def health(request: Request) -> Health:
-    demo = request.app.state.settings.demo_enabled
-    return Health(demo_enabled=demo, mis="mock_local" if demo else "not_configured")
+    settings = request.app.state.settings
+    demo = settings.demo_enabled
+    return Health(
+        demo_enabled=demo,
+        mis="mock_local" if demo else "not_configured",
+        speech="configured_unverified" if settings.whisperx_base_url else "not_configured",
+        llm="configured_unverified"
+        if settings.openai_api_key.get_secret_value()
+        else "not_configured",
+    )
 
 
 @router.post("/consultations", response_model=Consultation, status_code=201, tags=["consultations"])

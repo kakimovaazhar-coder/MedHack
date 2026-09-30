@@ -19,3 +19,9 @@ dist/
 build/
 coverage.xml
 .coverage
+*.wav
+*.mp3
+*.m4a
+*.webm
+*.ogg
+*.mp4

@@ -7,4 +7,4 @@ COPY backend/app ./app
 RUN useradd --create-home medhub && mkdir -p /app/data && chown -R medhub:medhub /app
 USER medhub
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]

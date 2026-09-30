@@ -122,7 +122,7 @@ class Health(Schema):
     status: Literal["ok"] = "ok"
     version: str = "0.1.0"
     demo_enabled: bool
-    speech: Literal["not_configured"] = "not_configured"
-    llm: Literal["not_configured"] = "not_configured"
+    speech: Literal["not_configured", "configured_unverified"] = "not_configured"
+    llm: Literal["not_configured", "configured_unverified"] = "not_configured"
     pii: Literal["not_implemented"] = "not_implemented"
     mis: Literal["mock_local", "not_configured"]

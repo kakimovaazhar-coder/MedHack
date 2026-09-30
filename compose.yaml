@@ -8,6 +8,10 @@ services:
     environment:
       MEDHUB_DEMO_ENABLED: "${MEDHUB_DEMO_ENABLED:-false}"
       MEDHUB_DATA_DIR: /app/data
+      MEDHUB_WHISPERX_BASE_URL: "${MEDHUB_WHISPERX_BASE_URL:-}"
+      MEDHUB_WHISPERX_API_TOKEN: "${MEDHUB_WHISPERX_API_TOKEN:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4.1-mini}"
       MEDHUB_CORS_ORIGINS: '${MEDHUB_CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}'
     volumes:
       - backend-data:/app/data

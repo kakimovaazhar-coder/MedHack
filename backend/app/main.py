@@ -1,4 +1,5 @@
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -16,17 +17,32 @@ from app.errors import (
 from app.repository import Repository
 from app.services.demo import DemoService
 from app.services.workflow import Workflow
+from app.services.workspaces import WorkspaceStore
+from app.workspace_api import router as workspace_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     repository = Repository(settings.data_dir / "medhub.sqlite3")
+    workspaces = WorkspaceStore(settings.workspace_ttl_seconds)
+
+    async def cleanup():
+        while True:
+            await asyncio.sleep(30)
+            workspaces.purge()
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         repository.initialize()
         repository.recover_interrupted_jobs()
-        yield
+        cleaner = asyncio.create_task(cleanup())
+        try:
+            yield
+        finally:
+            cleaner.cancel()
+            with suppress(asyncio.CancelledError):
+                await cleaner
+            workspaces.items.clear()
 
     application = FastAPI(
         title="MedHub consultation API",
@@ -42,17 +58,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.repository = repository
     application.state.workflow = Workflow(repository)
     application.state.demo = DemoService(repository)
+    application.state.workspaces = workspaces
     application.add_exception_handler(AppError, app_error_handler)
     application.add_exception_handler(RequestValidationError, validation_error_handler)
     application.add_exception_handler(HTTPException, http_error_handler)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_methods=["GET", "POST", "PATCH"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Content-Type"],
         allow_credentials=False,
     )
     application.include_router(router)
+    application.include_router(workspace_router)
+
+    @application.middleware("http")
+    async def prevent_clinical_cache(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/api/workspaces"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     return application
 
 

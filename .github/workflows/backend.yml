@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - run: npm run contracts:types
       - run: npm run contracts:check
+      - run: npm --prefix frontend ci
+      - run: npm --prefix frontend run build
       - run: git diff --exit-code -- contracts
       - run: docker compose config --quiet
       - run: docker compose build backend
