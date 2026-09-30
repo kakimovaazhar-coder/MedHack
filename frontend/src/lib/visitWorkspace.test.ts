@@ -4,6 +4,7 @@ import {
   mapWorkspace,
   DEMO_HISTORY,
   relatedHistory,
+  previousRecommendations,
 } from './visitWorkspace'
 import type { TranscriptSegment } from './visitTemplate'
 function s(
@@ -13,6 +14,23 @@ function s(
   return { id: crypto.randomUUID(), role, text, start: 0, end: 1, final: true }
 }
 describe('automatic frontend adapter', () => {
+  it('shows explicit recommendations from uploaded history without moving them into the current form', () => {
+    const record = {
+      id: 'history',
+      title: 'Прошлый приём',
+      date: null,
+      segments: [
+        s('Рекомендации: контроль анализов.'),
+        s('Мне назначали железо месяц назад.'),
+      ],
+    }
+    expect(previousRecommendations(record).map((item) => item.text)).toEqual([
+      'Рекомендации: контроль анализов.',
+    ])
+    expect(
+      mapWorkspace(null, [s('Беспокоит слабость.')]).values.recommendations,
+    ).toBe('')
+  })
   it('keeps patient-reported past prescriptions out of current treatment', () => {
     const input = [s('Мне назначали железо месяц назад.')]
     expect(annotateConversation(input)[0].role).toBe('patient')

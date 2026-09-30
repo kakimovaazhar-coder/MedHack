@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+      args:
+        VITE_MIS_EXPORT_URL: ${VITE_MIS_EXPORT_URL:-}
     ports:
       - "127.0.0.1:8080:80"
     depends_on:

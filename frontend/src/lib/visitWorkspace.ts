@@ -135,7 +135,7 @@ export function relatedHistory(
   )
 }
 export function previousRecommendations(record: HistoryRecord) {
-  return record.segments.filter(
+  return annotateConversation(record.segments).filter(
     (s) =>
       s.role === 'doctor' &&
       /рекоменд|назнач|контрол|сдать|принимать/i.test(s.text),

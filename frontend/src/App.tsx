@@ -7,8 +7,6 @@ import {
   Check,
   CheckCheck,
   ChevronDown,
-  Copy,
-  FilePlus2,
   FileText,
   History,
   Info,
@@ -20,19 +18,14 @@ import {
   Plus,
   RotateCcw,
   Search,
-  ShieldCheck,
+  Send,
   Sparkles,
   Square,
-  Stethoscope,
   Upload,
   X,
 } from 'lucide-react'
 import { useLiveTranscription } from './hooks/useLiveTranscription'
-import {
-  API_BASE,
-  useVisitWorkspace,
-  visitApi,
-} from './hooks/useVisitWorkspace'
+import { useVisitWorkspace, visitApi } from './hooks/useVisitWorkspace'
 import { getErrorMessage, isAbortError, type Workspace } from './lib/api'
 import {
   DEMO_HISTORY,
@@ -40,16 +33,13 @@ import {
   historyFromApi,
   mapWorkspace,
   previousRecommendations,
-  relatedHistory,
   type HistoryRecord,
 } from './lib/visitWorkspace'
 import {
-  ANEMIA_QUESTIONS,
   DEMO_SEGMENTS,
   FIELD_DEFINITIONS,
   FIELD_IDS,
   VITAL_DEFINITIONS,
-  formatTemplate,
   type FieldId,
   type PatientMetadata,
   type TemplateValues,
@@ -57,6 +47,12 @@ import {
   type TranscriptSegment,
 } from './lib/visitTemplate'
 import { downloadConsultation } from './lib/docx'
+import { sendToMis, type MisReceipt } from './lib/mis'
+import {
+  AUDIO_ACCEPT,
+  beginAudioUpload,
+  validateAudio,
+} from './lib/audioUpload'
 import './styles.css'
 
 const today = () => new Date().toLocaleDateString('en-CA')
@@ -170,35 +166,42 @@ function GrowText({
 export default function App() {
   const [segments, setSegments] = useState<TranscriptSegment[]>([])
   const [history, setHistory] = useState<HistoryRecord[]>([])
+  const [historyQuery, setHistoryQuery] = useState('')
+  const [demoPlaying, setDemoPlaying] = useState(false)
+  const [demoCursor, setDemoCursor] = useState(0)
   const [manual, setManual] = useState<Partial<TemplateValues>>({})
   const [manualVitals, setManualVitals] = useState<Partial<TemplateVitals>>({})
   const [metadata, setMetadata] = useState(blankMetadata)
   const [session, setSession] = useState(0)
   const [seed, setSeed] = useState<Workspace | null>(null)
-  const [source, setSource] = useState<'demo' | 'real'>('real')
-  const [demo, setDemo] = useState<'idle' | 'playing' | 'paused' | 'finished'>(
-    'idle',
-  )
-  const [cursor, setCursor] = useState({ index: 0, words: 0 })
+  const [source, setSource] = useState<'demo' | 'real'>(() => {
+    const params = new URLSearchParams(window.location.search)
+    return params.get('demo') === '1' && !params.has('workspace')
+      ? 'demo'
+      : 'real'
+  })
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
   const [dialog, setDialog] = useState<
-    'text' | 'history' | 'new' | 'example' | 'privacy' | 'connection' | null
+    'new' | 'example' | 'privacy' | 'connection' | 'mis' | null
   >(null)
-  const [text, setText] = useState('')
-  const [historyTitle, setHistoryTitle] = useState('Предыдущая консультация')
-  const [historyDate, setHistoryDate] = useState('')
   const [openedHistory, setOpenedHistory] = useState<HistoryRecord | null>(null)
   const [editing, setEditing] = useState<TranscriptSegment | null>(null)
   const [highlight, setHighlight] = useState<string[]>([])
   const [pane, setPane] = useState<'history' | 'conversation' | 'document'>(
     'conversation',
   )
-  const [historyFilter, setHistoryFilter] = useState<'all' | 'related'>('all')
-  const [search, setSearch] = useState('')
   const [reviewed, setReviewed] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [misReceipt, setMisReceipt] = useState<MisReceipt | null>(null)
+  const [misError, setMisError] = useState('')
+  const misRequest = useRef<{ snapshot: string; key: string } | null>(null)
+  const misController = useRef<AbortController | null>(null)
+  const misBusy = useRef(false)
   const [uploading, setUploading] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const startBusy = useRef(false)
   const [pending, setPending] = useState<{
     workspaceId: string
     jobId: string
@@ -207,7 +210,6 @@ export default function App() {
   } | null>(null)
   const [proposal, setProposal] = useState<FieldId | null>(null)
   const [showDetails, setShowDetails] = useState(false)
-  const [speechReady, setSpeechReady] = useState(false)
   const [capabilityError, setCapabilityError] = useState(false)
   const [following, setFollowing] = useState(true)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -216,6 +218,7 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null)
   const uploadKind = useRef<'current' | 'history'>('current')
   const uploadController = useRef<AbortController | null>(null)
+  const uploadBusy = useRef(false)
   const epoch = useRef(0)
   const offset = useRef(0)
   const mounted = useRef(true)
@@ -250,17 +253,6 @@ export default function App() {
   )
   const values = { ...derived.values, ...manual } as TemplateValues
   const vitals = { ...derived.vitals, ...manualVitals } as TemplateVitals
-  const related = useMemo(
-    () => relatedHistory(history, segments, ai.workspace),
-    [history, segments, ai.workspace],
-  )
-  const displayedHistory = (
-    historyFilter === 'related' ? related : history
-  ).filter((r) =>
-    `${r.title} ${r.segments.map((s) => s.text).join(' ')}`
-      .toLowerCase()
-      .includes(search.toLowerCase()),
-  )
   const filled = FIELD_IDS.filter(
     (id) =>
       values[id].trim() ||
@@ -272,81 +264,77 @@ export default function App() {
     'connecting',
     'finishing',
   ].includes(live.status)
-  const demoActive = demo === 'playing' || demo === 'paused'
-  const active = captureActive || demoActive || uploading
+  const active = captureActive || uploading || starting || sending
   const pendingProcessing =
     !!pending || live.pendingChunks > 0 || (source === 'real' && ai.waiting)
-  const canExport = filled > 0 && !active && !pendingProcessing
-  const listening = demo === 'playing' || live.status === 'recording'
-  const paused = demo === 'paused' || live.status === 'paused'
-  const currentDemo = DEMO_SEGMENTS[cursor.index]
-  const interim =
-    demoActive && currentDemo
-      ? currentDemo.text.split(/\s+/).slice(0, cursor.words).join(' ')
-      : ''
+  const demoIncomplete = source === 'demo' && demoCursor < DEMO_SEGMENTS.length
+  const canExport =
+    filled > 0 && !active && !pendingProcessing && !demoIncomplete
+  const matchingHistory = history.filter((record) => {
+    const normalize = (text: string) =>
+      text.toLocaleLowerCase('ru').replaceAll('ё', 'е')
+    const text = normalize(
+      [
+        record.title,
+        record.date ?? '',
+        displayDate(record.date),
+        ...record.segments.map((segment) => segment.text),
+      ].join(' '),
+    )
+    return normalize(historyQuery)
+      .trim()
+      .split(/\s+/)
+      .every((term) => text.includes(term))
+  })
+  const listening = live.status === 'recording'
+  const paused = live.status === 'paused'
   const seconds =
     source === 'demo'
-      ? currentDemo
-        ? currentDemo.start +
-          (currentDemo.end - currentDemo.start) *
-            Math.min(1, cursor.words / currentDemo.text.split(/\s+/).length)
-        : (DEMO_SEGMENTS.at(-1)?.end ?? 0)
+      ? (segments.at(-1)?.end ?? 0)
       : Math.max(offset.current + live.seconds, segments.at(-1)?.end ?? 0)
   const hasContent =
     segments.length > 0 || filled > 0 || history.length > 0 || pendingProcessing
-  const status =
-    demo === 'playing'
-      ? 'Учебный разговор'
-      : listening
-        ? 'Идёт запись'
-        : paused
-          ? 'На паузе'
-          : live.status === 'finishing'
-            ? 'Распознаём последние фразы'
-            : uploading
-              ? 'Распознаём аудиофайл'
-              : segments.length
-                ? 'Разговор записан'
-                : 'Готов к приёму'
-  const engineLabel =
-    source === 'demo'
-      ? 'Учебный пример'
-      : ai.busy
-        ? 'Заполняем по разговору'
-        : ai.capabilities?.engine === 'openai'
-          ? 'AI подключён'
-          : 'Предпросмотр · локальные правила'
-
+  const status = demoIncomplete
+    ? demoPlaying
+      ? 'Демо · идёт разговор'
+      : 'Демо · на паузе'
+    : listening
+      ? 'Идёт запись'
+      : paused
+        ? 'На паузе'
+        : live.status === 'finishing'
+          ? 'Распознаём последние фразы'
+          : uploading
+            ? 'Распознаём аудиофайл'
+            : segments.length
+              ? 'Разговор записан'
+              : 'Готов к приёму'
   async function refreshConnection() {
     try {
-      const response = await fetch(`${API_BASE}/live/capabilities`, {
-        cache: 'no-store',
-      })
-      if (!response.ok && ![404, 405].includes(response.status))
-        throw new Error()
-      const caps = response.ok
-        ? await response.json()
-        : await visitApi.capabilities()
-      setSpeechReady(caps.enabled && caps.speech === 'configured_unverified')
+      const caps = await visitApi.capabilities({ timeoutMs: 8000 })
       setCapabilityError(false)
       return caps.enabled && caps.speech === 'configured_unverified'
     } catch {
       setCapabilityError(true)
-      setSpeechReady(false)
       return false
     }
   }
   useEffect(() => {
     mounted.current = true
-    void refreshConnection()
     return () => {
       mounted.current = false
       epoch.current++
       uploadController.current?.abort()
+      misController.current?.abort()
     }
   }, [])
   useEffect(() => {
-    const id = new URLSearchParams(window.location.search).get('workspace')
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('demo') === '1' && !params.has('workspace')) {
+      example()
+      return
+    }
+    const id = params.get('workspace')
     if (!id) return
     const controller = new AbortController()
     void visitApi
@@ -368,6 +356,25 @@ export default function App() {
     return () => controller.abort()
   }, [])
   useEffect(() => {
+    if (source !== 'demo' || !demoPlaying || demoCursor >= DEMO_SEGMENTS.length)
+      return
+    const timer = setTimeout(
+      () => {
+        setSegments((old) => [...old, { ...DEMO_SEGMENTS[demoCursor] }])
+        setDemoCursor((cursor) => cursor + 1)
+        setReviewed(false)
+        if (demoCursor + 1 === DEMO_SEGMENTS.length) setDemoPlaying(false)
+      },
+      demoCursor === 0
+        ? 450
+        : Math.min(
+            3200,
+            Math.max(1800, DEMO_SEGMENTS[demoCursor - 1].text.length * 18),
+          ),
+    )
+    return () => clearTimeout(timer)
+  }, [source, demoPlaying, demoCursor])
+  useEffect(() => {
     if (!toast) return
     const t = setTimeout(() => setToast(''), 4500)
     return () => clearTimeout(t)
@@ -379,8 +386,15 @@ export default function App() {
   }, [highlight])
   useEffect(() => {
     if (following && scrollRef.current)
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-  }, [segments, interim, following])
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior:
+          source === 'demo' &&
+          !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+            ? 'smooth'
+            : 'instant',
+      })
+  }, [segments, following])
   useEffect(() => {
     if (!hasContent) return
     const handler = (event: BeforeUnloadEvent) => {
@@ -390,41 +404,24 @@ export default function App() {
     window.addEventListener('beforeunload', handler)
     return () => window.removeEventListener('beforeunload', handler)
   }, [hasContent])
-  useEffect(() => {
-    if (demo !== 'playing') return
-    if (!currentDemo) {
-      setDemo('finished')
-      return
-    }
-    const words = currentDemo.text.split(/\s+/).length
-    const timer = setTimeout(
-      () => {
-        if (cursor.words >= words) {
-          setSegments((old) => [...old, { ...currentDemo }])
-          setCursor({ index: cursor.index + 1, words: 0 })
-        } else
-          setCursor((old) => ({
-            ...old,
-            words: Math.min(words, old.words + 2),
-          }))
-      },
-      cursor.words >= words ? 700 : 140,
-    )
-    return () => clearTimeout(timer)
-  }, [demo, cursor, currentDemo])
   function clearForm(clearHistory = true) {
     setSegments([])
+    setDemoPlaying(false)
+    setDemoCursor(0)
+    setHistoryQuery('')
+    setMisReceipt(null)
+    setMisError('')
+    misRequest.current = null
     setManual({})
     setManualVitals({})
     setMetadata(blankMetadata())
     setReviewed(false)
-    setDemo('idle')
-    setCursor({ index: 0, words: 0 })
     setSource('real')
     setError('')
     setHighlight([])
     setFollowing(true)
     setProposal(null)
+    setShowDetails(false)
     setSeed(null)
     setSession((n) => n + 1)
     if (clearHistory) setHistory([])
@@ -443,48 +440,46 @@ export default function App() {
     reset()
     setSource('demo')
     setHistory(DEMO_HISTORY.map((r) => ({ ...r })))
-    setSegments(DEMO_SEGMENTS.map((segment) => ({ ...segment })))
-    setCursor({ index: DEMO_SEGMENTS.length, words: 0 })
-    setDemo('finished')
-    setFollowing(false)
+    setDemoPlaying(true)
+    setDemoCursor(0)
+    setFollowing(true)
     setPane('conversation')
     requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: 0 }))
   }
-  function finishExample() {
-    setSegments((old) =>
-      DEMO_SEGMENTS.map(
-        (s) => old.find((item) => item.id === s.id) ?? { ...s },
-      ),
-    )
-    setCursor({ index: DEMO_SEGMENTS.length, words: 0 })
-    setDemo('finished')
-  }
   async function start() {
-    if (!(await refreshConnection())) {
-      setDialog('connection')
-      return
-    }
-    const nextOffset = source === 'demo' ? 0 : seconds
-    if (
-      live.status === 'finished' ||
-      (live.status === 'error' && !live.pendingChunks)
-    )
-      live.reset()
-    offset.current = nextOffset
-    if (await live.start('unknown')) {
-      if (source === 'demo') clearForm()
-      setReviewed(false)
-      setPane('conversation')
+    if (startBusy.current || uploadBusy.current) return
+    startBusy.current = true
+    setStarting(true)
+    const own = epoch.current
+    try {
+      if (!(await refreshConnection())) {
+        if (mounted.current && own === epoch.current) setDialog('connection')
+        return
+      }
+      if (!mounted.current || own !== epoch.current) return
+      const nextOffset = source === 'demo' ? 0 : seconds
+      if (
+        live.status === 'finished' ||
+        (live.status === 'error' && !live.pendingChunks)
+      )
+        live.reset()
+      offset.current = nextOffset
+      if (await live.start('unknown')) {
+        if (source === 'demo') clearForm()
+        setReviewed(false)
+        setPane('conversation')
+      }
+    } finally {
+      startBusy.current = false
+      if (mounted.current) setStarting(false)
     }
   }
   function pause() {
-    if (demoActive) setDemo(demo === 'paused' ? 'playing' : 'paused')
-    else if (live.status === 'paused') void live.resume()
+    if (live.status === 'paused') void live.resume()
     else live.pause()
   }
   async function stop() {
-    if (demoActive) setDemo('finished')
-    else await live.stop()
+    await live.stop()
   }
   function editField(id: FieldId, value: string) {
     setManual((old) => ({ ...old, [id]: value }))
@@ -507,75 +502,20 @@ export default function App() {
         ?.scrollIntoView({ block: 'center', behavior: 'smooth' }),
     )
   }
-  function jump(id: FieldId) {
-    setPane('document')
-    requestAnimationFrame(() =>
-      fieldRefs.current
-        .get(id)
-        ?.scrollIntoView({ block: 'center', behavior: 'smooth' }),
-    )
-  }
-  function addText() {
-    if (!text.trim()) return
-    const item: TranscriptSegment = {
-      id: crypto.randomUUID(),
-      role: 'unknown',
-      text: text.trim(),
-      start: seconds,
-      end: seconds + 1,
-      final: true,
-    }
-    if (dialog === 'history') {
-      if (history.length >= 10) {
-        setError('В одной сессии можно использовать до 10 прошлых записей.')
-        return
-      }
-      if (source === 'demo') {
-        clearForm()
-        setHistory([
-          {
-            id: crypto.randomUUID(),
-            title: historyTitle.trim() || 'Предыдущая запись',
-            date: historyDate || null,
-            segments: [item],
-          },
-        ])
-      } else
-        setHistory((old) => [
-          ...old,
-          {
-            id: crypto.randomUUID(),
-            title: historyTitle.trim() || 'Предыдущая запись',
-            date: historyDate || null,
-            segments: [item],
-          },
-        ])
-    } else {
-      if (source === 'demo') {
-        clearForm()
-        item.start = 0
-        item.end = 1
-      }
-      setSegments((old) => [...old, item])
-      setReviewed(false)
-    }
-    setDialog(null)
-    setText('')
-  }
   async function processAudio(file?: File) {
-    if (uploading) return
-    if (file && file.size > 30 * 1024 * 1024) {
-      setError('Максимальный размер файла — 30 МБ.')
+    if (uploadBusy.current || captureActive) return
+    const kind = uploadKind.current
+    try {
+      if (file) validateAudio(file)
+      if (file && kind === 'history' && history.length >= 10)
+        throw new Error('В истории уже 10 записей. Начните новый приём.')
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : 'Не удалось прочитать файл.',
+      )
       return
     }
-    if (file && uploadKind.current === 'history' && history.length >= 10) {
-      setError('Доступно до 10 прошлых записей на сессию.')
-      return
-    }
-    if (file && !(await refreshConnection())) {
-      setDialog('connection')
-      return
-    }
+    uploadBusy.current = true
     const own = epoch.current
     const abort = new AbortController()
     uploadController.current = abort
@@ -585,19 +525,17 @@ export default function App() {
     let task = pending
     try {
       if (file) {
-        const ws = await visitApi.create({ signal: abort.signal })
-        const job = await visitApi.uploadAudio(
-          ws,
-          file,
-          { title: file.name, kind: 'current', language: 'auto' },
-          { signal: abort.signal },
-        )
-        task = {
-          workspaceId: ws.id,
-          jobId: job.id,
-          kind: uploadKind.current,
-          title: file.name,
+        if (!(await refreshConnection())) {
+          setDialog('connection')
+          return
         }
+        if (own !== epoch.current || abort.signal.aborted) return
+        const accepted = await beginAudioUpload(visitApi, file, abort.signal)
+        if (own !== epoch.current || !mounted.current) {
+          void visitApi.remove(accepted.workspaceId).catch(() => {})
+          return
+        }
+        task = { ...accepted, kind, title: file.name }
         setPending(task)
       }
       if (!task) return
@@ -641,6 +579,7 @@ export default function App() {
           [
             'TRANSCRIPTION_FAILED',
             'WORKSPACE_EXPIRED',
+            'WORKSPACE_NOT_FOUND',
             'JOB_NOT_FOUND',
           ].includes(String(e.code))
         ) {
@@ -649,6 +588,7 @@ export default function App() {
         }
       }
     } finally {
+      uploadBusy.current = false
       if (own === epoch.current) setUploading(false)
     }
   }
@@ -668,14 +608,40 @@ export default function App() {
       setExporting(false)
     }
   }
-  async function copy() {
+  async function exportMis() {
+    if (!canExport || !reviewed || misBusy.current) return
+    const document = { metadata, fields: values, vitals }
+    const snapshot = JSON.stringify(document)
+    if (misRequest.current?.snapshot !== snapshot)
+      misRequest.current = { snapshot, key: crypto.randomUUID() }
+    const own = epoch.current
+    const controller = new AbortController()
+    misController.current = controller
+    const timeout = setTimeout(() => controller.abort(), 15000)
+    misBusy.current = true
+    setSending(true)
+    setMisReceipt(null)
+    setMisError('')
+    setDialog('mis')
     try {
-      await navigator.clipboard.writeText(
-        formatTemplate({ values, vitals, metadata }),
-      )
-      setToast('Бланк скопирован.')
-    } catch {
-      setError('Браузер не разрешил копирование. Используйте файл Word.')
+      const receipt = await sendToMis(document, {
+        demo: source === 'demo',
+        idempotencyKey: misRequest.current.key,
+        endpoint: import.meta.env.VITE_MIS_EXPORT_URL,
+        signal: controller.signal,
+      })
+      if (mounted.current && epoch.current === own) setMisReceipt(receipt)
+    } catch (reason) {
+      if (mounted.current && epoch.current === own)
+        setMisError(
+          isAbortError(reason)
+            ? 'МИС не ответила вовремя. Перед повтором проверьте статус отправки.'
+            : getErrorMessage(reason),
+        )
+    } finally {
+      clearTimeout(timeout)
+      misBusy.current = false
+      if (mounted.current && epoch.current === own) setSending(false)
     }
   }
   function newVisit() {
@@ -699,118 +665,111 @@ export default function App() {
       <header className="topbar">
         <a href="#main" className="brand">
           <span className="brand-icon">
-            <Stethoscope size={24} />
+            <AudioLines size={25} />
           </span>
-          <span>
-            MedRep<small>АССИСТЕНТ ВРАЧА</small>
-          </span>
+          <h1>MedRep</h1>
         </a>
-        <button
-          className="button quiet new-visit-button"
-          disabled={active || !!pending || live.pendingChunks > 0}
-          onClick={() => (hasContent ? setDialog('new') : reset())}
-        >
-          <Plus size={20} />
-          Новый приём
-        </button>
-        <button
-          className="privacy-button"
-          aria-label="Об обработке данных"
-          onClick={() => setDialog('privacy')}
-        >
-          <ShieldCheck size={17} />
-          <span>Обработка данных</span>
-        </button>
+        <div className="visit-actions">
+          <div className="record-actions">
+            {starting ? (
+              <button className="button primary" disabled>
+                <LoaderCircle size={22} className="spin" />
+                Подключаем…
+              </button>
+            ) : uploading ? (
+              <button className="button primary" disabled>
+                <LoaderCircle size={22} className="spin" />
+                Распознаём…
+              </button>
+            ) : active ? (
+              <>
+                <button
+                  className="button secondary pause-button"
+                  aria-label={paused ? 'Продолжить запись' : 'Пауза'}
+                  title={paused ? 'Продолжить запись' : 'Пауза'}
+                  disabled={
+                    uploading ||
+                    live.status === 'finishing' ||
+                    live.status === 'connecting'
+                  }
+                  onClick={pause}
+                >
+                  {paused ? <Play size={17} /> : <Pause size={17} />}
+                  <span>{paused ? 'Продолжить' : 'Пауза'}</span>
+                </button>
+                <button
+                  className="button primary"
+                  disabled={
+                    uploading ||
+                    live.status === 'finishing' ||
+                    live.status === 'connecting'
+                  }
+                  onClick={() => void stop()}
+                >
+                  {live.status === 'finishing' || uploading ? (
+                    <LoaderCircle size={17} className="spin" />
+                  ) : (
+                    <Square size={14} />
+                  )}
+                  Завершить запись
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  className="button primary start-button"
+                  disabled={!!pending || live.pendingChunks > 0}
+                  onClick={() => void start()}
+                >
+                  <Mic size={18} />
+                  {segments.length && source !== 'demo'
+                    ? 'Продолжить запись'
+                    : 'Начать запись'}
+                </button>
+              </>
+            )}
+          </div>
+          <button
+            className="button secondary upload-button"
+            disabled={active || !!pending || live.pendingChunks > 0}
+            onClick={() => chooseAudio('current')}
+          >
+            <Upload size={20} />
+            Добавить аудио
+          </button>
+        </div>
+
+        <div className="utility-actions">
+          {source === 'demo' && (
+            <span
+              className="demo-badge"
+              title="Учебный пример. Все данные вымышлены."
+            >
+              Демо
+            </span>
+          )}
+          {hasContent && (
+            <button
+              className="icon-button"
+              aria-label="Новый приём"
+              title="Новый приём"
+              disabled={active || !!pending || live.pendingChunks > 0}
+              onClick={() => setDialog('new')}
+            >
+              <Plus size={21} />
+            </button>
+          )}
+          <button
+            className="icon-button"
+            aria-label="Об обработке данных"
+            title="Об обработке данных"
+            onClick={() => setDialog('privacy')}
+          >
+            <Info size={19} />
+          </button>
+        </div>
       </header>
       <main id="main">
-        <div className="visit-heading">
-          <div className="visit-intro">
-            <h1>
-              {active
-                ? 'Приём идёт'
-                : pendingProcessing && !ai.error
-                  ? 'Готовим бланк'
-                  : segments.length
-                    ? 'Проверьте бланк — и готово'
-                    : 'Начните приём одним нажатием'}
-            </h1>
-            <p>
-              {active
-                ? 'Говорите с пациентом. Текст и бланк заполняются автоматически.'
-                : pendingProcessing && !ai.error
-                  ? 'Обрабатываем последние реплики. Подождите немного.'
-                  : segments.length
-                    ? 'Любую запись в бланке можно исправить. Затем скачайте Word.'
-                    : 'Говорите с пациентом. MedRep запишет разговор и заполнит бланк.'}
-            </p>
-          </div>
-          <div className="visit-actions">
-            <div className="record-actions">
-              {active ? (
-                <>
-                  <button
-                    className="button secondary pause-button"
-                    disabled={
-                      uploading ||
-                      live.status === 'finishing' ||
-                      live.status === 'connecting'
-                    }
-                    onClick={pause}
-                  >
-                    {paused ? <Play size={17} /> : <Pause size={17} />}
-                    <span>{paused ? 'Продолжить' : 'Пауза'}</span>
-                  </button>
-                  <button
-                    className="button primary"
-                    disabled={
-                      uploading ||
-                      live.status === 'finishing' ||
-                      live.status === 'connecting'
-                    }
-                    onClick={() => void stop()}
-                  >
-                    {live.status === 'finishing' || uploading ? (
-                      <LoaderCircle size={17} className="spin" />
-                    ) : (
-                      <Square size={14} />
-                    )}
-                    Завершить запись
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    className="button primary start-button"
-                    disabled={!!pending || live.pendingChunks > 0}
-                    onClick={() => void start()}
-                  >
-                    <Mic size={18} />
-                    {segments.length && source !== 'demo'
-                      ? 'Продолжить запись'
-                      : 'Начать приём'}
-                  </button>
-                </>
-              )}
-            </div>
-            <button
-              className="button secondary demo-launch"
-              disabled={active || !!pending || live.pendingChunks > 0}
-              onClick={() => (hasContent ? setDialog('example') : example())}
-            >
-              <Play size={20} />
-              Показать пример
-            </button>
-          </div>
-        </div>
-        {source === 'demo' && (
-          <div className="demo-banner">
-            <Info size={18} />
-            <span>
-              <strong>Учебный пример.</strong> История, разговор и заполненный
-              бланк — все данные вымышлены.
-            </span>
-          </div>
-        )}
         <nav className="mobile-panes" aria-label="Рабочие панели">
           {(
             [
@@ -844,42 +803,30 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <span className="panel-number" aria-hidden="true">
-                  1
-                </span>
                 <span>
                   <h2>История</h2>
-                  <small>Прошлые записи пациента</small>
                 </span>
               </div>
               <span className="count-badge">{history.length}</span>
             </header>
-            <div className="history-tools">
-              <label className="search">
-                <Search size={15} />
-                <input
-                  aria-label="Поиск в истории"
-                  placeholder="Найти в истории"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />
-              </label>
-              <div className="segmented">
+            <div className="history-search">
+              <Search size={18} />
+              <input
+                type="search"
+                aria-label="Поиск в истории"
+                placeholder="Поиск в истории"
+                value={historyQuery}
+                onChange={(event) => setHistoryQuery(event.target.value)}
+              />
+              {historyQuery && (
                 <button
-                  className={historyFilter === 'all' ? 'selected' : ''}
-                  aria-pressed={historyFilter === 'all'}
-                  onClick={() => setHistoryFilter('all')}
+                  className="icon-button"
+                  aria-label="Очистить поиск"
+                  onClick={() => setHistoryQuery('')}
                 >
-                  Все записи
+                  <X size={16} />
                 </button>
-                <button
-                  className={historyFilter === 'related' ? 'selected' : ''}
-                  aria-pressed={historyFilter === 'related'}
-                  onClick={() => setHistoryFilter('related')}
-                >
-                  По теме <small>{related.length}</small>
-                </button>
-              </div>
+              )}
             </div>
             <div className="history-scroll">
               {history.length === 0 ? (
@@ -887,49 +834,21 @@ export default function App() {
                   <div className="empty-icon">
                     <History size={26} />
                   </div>
-                  <h3>Пока нет прошлых записей</h3>
-                  <p>
-                    Добавьте предыдущую консультацию, чтобы видеть жалобы и
-                    назначения в контексте.
-                  </p>
-                  <button
-                    className="text-button"
-                    onClick={() => {
-                      setText('')
-                      setDialog('history')
-                    }}
-                  >
-                    <Plus size={14} />
-                    Добавить прошлую запись
-                  </button>
+                  <h3>История приёмов</h3>
+                  <p>Здесь будут прошлые записи и рекомендации.</p>
                 </div>
               ) : (
                 <>
-                  {source === 'demo' && (
-                    <div className="history-demo-note">
-                      Записи учебного пациента
+                  {matchingHistory.length === 0 && (
+                    <div className="history-empty">
+                      <h3>Ничего не найдено</h3>
+                      <p>Попробуйте другое слово или дату.</p>
                     </div>
                   )}
-                  {displayedHistory.length === 0 && (
-                    <div className="small-empty">
-                      Подходящих записей не найдено.
-                    </div>
-                  )}
-                  {displayedHistory.map((record) => (
-                    <article
-                      className={`history-card ${related.includes(record) ? 'related' : ''}`}
-                      key={record.id}
-                    >
+                  {matchingHistory.map((record) => (
+                    <article className="history-card" key={record.id}>
                       <div className="history-date">
                         <span>{displayDate(record.date)}</span>
-                        {related.includes(record) && (
-                          <span
-                            className="related-mark"
-                            title="Связано с текущим разговором"
-                          >
-                            <Sparkles size={12} />
-                          </span>
-                        )}
                       </div>
                       <button
                         className="history-title"
@@ -950,45 +869,19 @@ export default function App() {
                           ))}
                         </div>
                       )}
-                      <button
-                        className="history-source"
-                        onClick={() => setOpenedHistory(record)}
-                      >
-                        Открыть запись <ArrowUpRight size={12} />
-                      </button>
                     </article>
                   ))}
                 </>
               )}
-              {history.length > 0 && (
-                <div className="history-footnote">
-                  <Info size={14} />
-                  <p>
-                    Прошлые назначения — для контекста. В сегодняшний бланк они
-                    не переносятся автоматически.
-                  </p>
-                </div>
-              )}
             </div>
             <footer className="history-footer">
               <button
-                className="button secondary"
-                disabled={active || !!pending}
-                onClick={() => {
-                  setText('')
-                  setDialog('history')
-                }}
-              >
-                <FilePlus2 size={15} />
-                Добавить запись
-              </button>
-              <button
-                className="icon-button"
-                aria-label="Добавить прошлую аудиозапись"
+                className="text-button"
                 disabled={active || !!pending}
                 onClick={() => chooseAudio('history')}
               >
-                <Upload size={17} />
+                <Plus size={18} />
+                Добавить прошлую запись
               </button>
             </footer>
           </aside>
@@ -998,18 +891,49 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <span className="panel-number" aria-hidden="true">
-                  2
-                </span>
                 <span>
                   <h2>Разговор</h2>
-                  <small>Что говорят врач и пациент</small>
                 </span>
               </div>
+              {source === 'demo' && (
+                <button
+                  className="demo-control"
+                  aria-label={
+                    demoIncomplete
+                      ? demoPlaying
+                        ? 'Приостановить демо'
+                        : 'Продолжить демо'
+                      : 'Повторить демо'
+                  }
+                  onClick={() =>
+                    demoIncomplete
+                      ? setDemoPlaying((playing) => !playing)
+                      : example()
+                  }
+                  disabled={active}
+                >
+                  {demoIncomplete ? (
+                    demoPlaying ? (
+                      <Pause size={15} />
+                    ) : (
+                      <Play size={15} />
+                    )
+                  ) : (
+                    <RotateCcw size={15} />
+                  )}
+                  {demoIncomplete
+                    ? demoPlaying
+                      ? 'Пауза'
+                      : 'Продолжить'
+                    : 'Повторить'}
+                </button>
+              )}
             </header>
             <div className="conversation-status">
               <span>
-                <span className={`status-dot ${listening ? 'pulse' : ''}`} />
+                <span
+                  className={`status-dot ${listening || demoPlaying ? 'pulse' : ''}`}
+                />
                 {status}
               </span>
               <time>{time(seconds)}</time>
@@ -1026,48 +950,35 @@ export default function App() {
               }}
             >
               {!segments.length &&
-                !demoActive &&
                 !captureActive &&
-                !uploading && (
+                !uploading &&
+                !demoPlaying && (
                   <div className="conversation-empty">
                     <div className="mic-orbit">
                       <Mic size={31} />
                       <span />
                       <span />
                     </div>
-                    <h3>Всё начинается с разговора</h3>
+                    <h3>
+                      {demoIncomplete ? 'Демо на паузе' : 'Готовы слушать'}
+                    </h3>
                     <p>
-                      Нажмите «Начать приём» вверху и говорите с пациентом как
-                      обычно. Мы запишем текст и поможем заполнить бланк.
+                      {demoIncomplete
+                        ? 'Нажмите «Продолжить».'
+                        : 'Начните запись или добавьте аудио.'}
                     </p>
-                    <div className="automatic-note">
-                      <Sparkles size={14} />
-                      Язык определяется автоматически
-                    </div>
                   </div>
                 )}
               {annotated.map((segment) => {
-                const fields = FIELD_IDS.filter((id) =>
-                  derived.sources[id].includes(segment.id),
-                )
                 return (
                   <article
-                    className={`utterance ${segment.role} ${highlight.includes(segment.id) ? 'source-highlight' : ''}`}
+                    className={`utterance ${source === 'demo' ? 'demo-utterance' : ''} ${segment.role} ${highlight.includes(segment.id) ? 'source-highlight' : ''}`}
                     key={segment.id}
                     ref={(el) => {
                       if (el) segmentRefs.current.set(segment.id, el)
                       else segmentRefs.current.delete(segment.id)
                     }}
                   >
-                    <div className="utterance-avatar">
-                      {segment.role === 'doctor' ? (
-                        <Stethoscope size={15} />
-                      ) : segment.role === 'patient' ? (
-                        <span>П</span>
-                      ) : (
-                        <AudioLines size={15} />
-                      )}
-                    </div>
                     <div className="utterance-body">
                       <div className="utterance-meta">
                         <strong>{speaker(segment.role)}</strong>
@@ -1081,41 +992,31 @@ export default function App() {
                         </button>
                       </div>
                       <p>{segment.text}</p>
-                      {fields.length > 0 && (
-                        <div className="mapped-fields">
-                          {fields.map((id) => (
-                            <button key={id} onClick={() => jump(id)}>
-                              <Check size={11} />
-                              {
-                                FIELD_DEFINITIONS.find((f) => f.id === id)
-                                  ?.label
-                              }
-                            </button>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   </article>
                 )
               })}
-              {(interim || listening) && (
-                <div className="interim">
+              {(listening || demoPlaying) && (
+                <div className="interim" role="status">
                   <span className="interim-dot" />
                   <p>
-                    {interim ||
-                      'Слушаем… Новая реплика появится после короткой фразы.'}
+                    {demoPlaying ? 'Следующая реплика' : 'Слушаем…'}
                     <span className="typing-cursor" />
                   </p>
                 </div>
               )}
-              {segments.length > 0 && !listening && !paused && !active && (
-                <div className="transcript-end">
-                  <CheckCircle />
-                  Расшифровка сохранена в этой вкладке
-                </div>
-              )}
+              {segments.length > 0 &&
+                !listening &&
+                !paused &&
+                !active &&
+                !demoIncomplete && (
+                  <div className="transcript-end">
+                    <CheckCircle />
+                    Готово
+                  </div>
+                )}
             </div>
-            {!following && segments.length > 0 && active && (
+            {!following && segments.length > 0 && (active || demoPlaying) && (
               <button
                 className="follow-button"
                 onClick={() => {
@@ -1165,68 +1066,6 @@ export default function App() {
                 )}
               </div>
             )}
-            <footer className="recorder-footer">
-              <div className="audio-strip">
-                <div
-                  className={`audio-meter ${listening ? 'active' : ''}`}
-                  aria-hidden="true"
-                >
-                  {Array.from({ length: 30 }, (_, i) => (
-                    <span
-                      key={i}
-                      style={{
-                        height: `${listening ? 5 + Math.abs(Math.sin(i * 1.5 + seconds)) * (source === 'demo' ? 17 : 6 + live.level * 32) : 3 + Math.abs(Math.sin(i * 1.5)) * 3}px`,
-                      }}
-                    />
-                  ))}
-                </div>
-                <span>
-                  {source === 'demo'
-                    ? 'Учебный разговор'
-                    : listening
-                      ? 'Язык: авто · запись включена'
-                      : 'Микрофон выключен'}
-                </span>
-              </div>
-              <div className="conversation-imports">
-                <button
-                  className="text-button"
-                  disabled={active || !!pending || live.pendingChunks > 0}
-                  onClick={() => {
-                    setText('')
-                    setDialog('text')
-                  }}
-                >
-                  <FileText size={18} />
-                  Вставить текст
-                </button>
-                <button
-                  className="text-button"
-                  disabled={active || !!pending || live.pendingChunks > 0}
-                  onClick={() => chooseAudio('current')}
-                >
-                  <Upload size={18} />
-                  Загрузить аудио
-                </button>
-              </div>
-              {demoActive ? (
-                <button className="skip-demo" onClick={finishExample}>
-                  Показать пример целиком <ArrowUpRight size={12} />
-                </button>
-              ) : (
-                <p className="record-notice">
-                  {source === 'demo' ? (
-                    'Пример работает без микрофона.'
-                  ) : speechReady ? (
-                    'Начинайте запись с согласия пациента.'
-                  ) : (
-                    <button onClick={() => setDialog('connection')}>
-                      Распознавание не подключено · Подробнее
-                    </button>
-                  )}
-                </p>
-              )}
-            </footer>
           </section>
           <section
             className="panel document-panel"
@@ -1234,18 +1073,14 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <span className="panel-number" aria-hidden="true">
-                  3
-                </span>
                 <span>
                   <h2>Бланк</h2>
-                  <small>Готовится автоматически</small>
                 </span>
               </div>
               <span
-                className={`document-status ${listening || ai.busy ? 'updating' : reviewed ? 'reviewed' : ''}`}
+                className={`document-status ${listening || demoPlaying || ai.busy ? 'updating' : reviewed ? 'reviewed' : ''}`}
               >
-                {listening || ai.busy ? (
+                {listening || demoPlaying || ai.busy ? (
                   <>
                     <Sparkles size={12} />
                     Заполняется
@@ -1426,36 +1261,8 @@ export default function App() {
                   {metadata.doctor || '____________________________'}
                 </div>
               </div>
-              <div className="document-help">
-                <Info size={13} />
-                <p>
-                  Неозвученные сведения остаются пустыми. Любую запись можно
-                  исправить прямо в бланке.
-                </p>
-              </div>
-              <details className="question-checklist">
-                <summary>
-                  Подсказки для сбора анамнеза анемии <ChevronDown size={13} />
-                </summary>
-                <ul>
-                  {ANEMIA_QUESTIONS.map((q) => (
-                    <li key={q}>{q}</li>
-                  ))}
-                </ul>
-              </details>
             </div>
             <footer className="document-footer">
-              <div className="engine-status" title={engineLabel}>
-                <Sparkles size={13} />
-                <span>
-                  {active || pendingProcessing
-                    ? 'Заполняем бланк по разговору'
-                    : filled
-                      ? 'Проверьте сведения перед выдачей'
-                      : 'Сведения появятся из разговора'}
-                </span>
-                {ai.busy && <LoaderCircle size={13} className="spin" />}
-              </div>
               {ai.error && source === 'real' && (
                 <div className="ai-error" role="alert">
                   {ai.error}
@@ -1472,59 +1279,44 @@ export default function App() {
                     disabled={!canExport}
                     onChange={(e) => setReviewed(e.target.checked)}
                   />
-                  Я проверил(а) бланк
+                  Проверено
                 </label>
               </div>
               <div className="export-actions">
                 <button
-                  className="button primary"
+                  className="button secondary"
                   disabled={!reviewed || !canExport || exporting}
                   onClick={() => void exportWord()}
+                  aria-label="Скачать Word"
                 >
                   {exporting ? (
                     <LoaderCircle size={17} className="spin" />
                   ) : (
                     <ArrowDownToLine size={17} />
                   )}
-                  Скачать Word
+                  Word
                 </button>
                 <button
-                  className="button secondary"
-                  disabled={!reviewed || !canExport}
-                  onClick={() => void copy()}
-                  aria-label="Скопировать бланк"
+                  className="button primary"
+                  disabled={!reviewed || !canExport || exporting}
+                  onClick={() => void exportMis()}
                 >
-                  <Copy size={17} />
+                  {sending ? (
+                    <LoaderCircle size={17} className="spin" />
+                  ) : (
+                    <Send size={17} />
+                  )}
+                  Отправить в МИС
                 </button>
               </div>
-              <p className="export-hint">
-                {active
-                  ? 'Завершите запись, чтобы проверить и скачать бланк'
-                  : pendingProcessing
-                    ? 'Дождитесь обработки последних реплик'
-                    : !filled
-                      ? 'Начните приём или нажмите «Показать пример»'
-                      : !reviewed
-                        ? 'Отметьте проверку — скачивание станет доступно'
-                        : 'Файл можно открыть и распечатать в Word'}
-              </p>
             </footer>
           </section>
         </div>
-        <footer className="page-footer">
-          <span>
-            <ShieldCheck size={12} />
-            Документ остаётся доступным в текущей вкладке
-          </span>
-          <button onClick={() => setDialog('privacy')}>
-            Об обработке данных
-          </button>
-        </footer>
       </main>
       <input
         ref={fileRef}
         type="file"
-        accept="audio/*,.wav,.mp3,.m4a,.webm"
+        accept={AUDIO_ACCEPT}
         hidden
         onChange={(e) => {
           const file = e.target.files?.[0]
@@ -1538,69 +1330,48 @@ export default function App() {
           {toast}
         </div>
       )}
-      {(dialog === 'text' || dialog === 'history') && (
+      {dialog === 'mis' && (
         <Modal
           title={
-            dialog === 'history'
-              ? 'Добавить прошлую запись'
-              : 'Добавить текст разговора'
+            sending
+              ? 'Отправляем в МИС…'
+              : misReceipt?.mode === 'demo'
+                ? 'Демо-отправка'
+                : misReceipt
+                  ? 'Отправлено в МИС'
+                  : 'Отправка в МИС'
           }
           onClose={() => setDialog(null)}
+          busy={sending}
         >
-          <p className="modal-intro">
-            {dialog === 'history'
-              ? 'Запись будет доступна в истории и учтена при поиске контекста.'
-              : 'Текст появится в расшифровке. Бланк обновится автоматически.'}
-          </p>
-          {source === 'demo' && (
-            <div className="notice">
-              Добавленный материал начнёт чистый приём. Учебные данные будут
-              убраны.
-            </div>
-          )}
-          {dialog === 'history' && (
-            <div className="modal-grid">
-              <label>
-                Название
-                <input
-                  value={historyTitle}
-                  onChange={(e) => setHistoryTitle(e.target.value)}
-                  maxLength={150}
-                />
-              </label>
-              <label>
-                Дата записи, если известна
-                <input
-                  type="date"
-                  value={historyDate}
-                  onChange={(e) => setHistoryDate(e.target.value)}
-                />
-              </label>
-            </div>
-          )}
-          <textarea
-            className="large-textarea"
-            aria-label="Текст разговора"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder="Вставьте текст записи…"
-            maxLength={10000}
-          />
-          <div className="modal-actions">
-            <button
-              className="button secondary"
-              onClick={() => setDialog(null)}
-            >
-              Отмена
-            </button>
-            <button
-              className="button primary"
-              disabled={!text.trim()}
-              onClick={addText}
-            >
-              Добавить
-            </button>
+          <div className="mis-result" role="status">
+            {sending ? (
+              <LoaderCircle size={32} className="spin" />
+            ) : misReceipt ? (
+              <CheckCheck size={32} />
+            ) : (
+              <Info size={32} />
+            )}
+            <p>
+              {sending
+                ? 'Ожидаем подтверждение.'
+                : misReceipt?.mode === 'demo'
+                  ? 'Сценарий отправки показан. В настоящую МИС данные не передавались.'
+                  : misReceipt
+                    ? `МИС подтвердила получение. Квитанция: ${misReceipt.receipt_id}`
+                    : misError}
+            </p>
           </div>
+          {!sending && (
+            <div className="modal-actions">
+              <button
+                className="button primary"
+                onClick={() => setDialog(null)}
+              >
+                Понятно
+              </button>
+            </div>
+          )}
         </Modal>
       )}
       {(dialog === 'new' || dialog === 'example') && (
@@ -1652,9 +1423,9 @@ export default function App() {
               : 'Сервер речи ещё не подключён к этому интерфейсу'}
           </h3>
           <p className="modal-intro">
-            Когда подключение будет настроено, достаточно нажать «Начать приём».
-            Язык определяется автоматически, дополнительных настроек для врача
-            нет.
+            Когда подключение будет настроено, достаточно нажать «Начать
+            запись». Язык определяется автоматически, дополнительных настроек
+            для врача нет.
           </p>
           <div className="modal-actions">
             <button
@@ -1686,7 +1457,7 @@ export default function App() {
         <Modal title="Обработка данных приёма" onClose={() => setDialog(null)}>
           <div className="privacy-content">
             <p>
-              Микрофон включается только после нажатия «Начать приём».
+              Микрофон включается только после нажатия «Начать запись».
               Записывайте разговор с согласия пациента.
             </p>
             <p>

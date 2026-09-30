@@ -4,6 +4,8 @@ COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend/ ./
 COPY contracts/ /app/contracts/
+ARG VITE_MIS_EXPORT_URL=
+ENV VITE_MIS_EXPORT_URL=$VITE_MIS_EXPORT_URL
 RUN npm run build
 
 FROM nginx:alpine AS runtime

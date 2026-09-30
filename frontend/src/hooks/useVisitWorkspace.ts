@@ -25,6 +25,8 @@ const fingerprint = (input: Input) =>
 /** One serial worker, latest snapshot wins. No overlapping revisioned mutations or stale UI results. */
 export function useVisitWorkspace(input: Input) {
   const [capabilities, setCapabilities] = useState<Capabilities | null>(null)
+  const [capabilityError, setCapabilityError] = useState('')
+  const [checking, setChecking] = useState(true)
   const [result, setResult] = useState<{
     key: string
     workspace: Workspace
@@ -41,13 +43,34 @@ export function useVisitWorkspace(input: Input) {
   const done = useRef('')
   const key = fingerprint(input)
   useEffect(() => {
+    if (!input.enabled) {
+      setChecking(false)
+      return
+    }
     const abort = new AbortController()
+    setChecking(true)
+    setCapabilityError('')
     void visitApi
       .capabilities({ signal: abort.signal })
-      .then(setCapabilities)
-      .catch(() => {})
+      .then((value) => {
+        if (abort.signal.aborted) return
+        setCapabilities(value)
+        if (!value.enabled)
+          setCapabilityError(
+            'Сервис заполнения недоступен. Повторите подключение.',
+          )
+      })
+      .catch((reason) => {
+        if (!abort.signal.aborted) {
+          setCapabilities(null)
+          setCapabilityError(getErrorMessage(reason))
+        }
+      })
+      .finally(() => {
+        if (!abort.signal.aborted) setChecking(false)
+      })
     return () => abort.abort()
-  }, [retryCount])
+  }, [retryCount, input.enabled])
   useEffect(() => {
     generation.current++
     controller.current?.abort()
@@ -164,9 +187,11 @@ export function useVisitWorkspace(input: Input) {
     waiting:
       input.enabled &&
       input.segments.length > 0 &&
-      !!capabilities?.enabled &&
-      result?.key !== key,
-    error,
+      (checking ||
+        !!capabilityError ||
+        (!!capabilities?.enabled && result?.key !== key)),
+    error:
+      input.enabled && input.segments.length ? error || capabilityError : '',
     retry: () => retry((n) => n + 1),
   }
 }
