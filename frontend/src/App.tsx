@@ -134,9 +134,26 @@ function GrowText({
 }) {
   const ref = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {
-    if (ref.current) {
-      ref.current.style.height = 'auto'
-      ref.current.style.height = ref.current.scrollHeight + 'px'
+    const element = ref.current
+    if (!element) return
+    let mounted = true
+    const resize = () => {
+      if (!mounted || !element.getBoundingClientRect().width) return
+      element.style.height = 'auto'
+      element.style.height = `${element.scrollHeight + 2}px`
+    }
+    resize()
+    let previousWidth = -1
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width === previousWidth) return
+      previousWidth = entry.contentRect.width
+      resize()
+    })
+    observer.observe(element)
+    void document.fonts.ready.then(resize)
+    return () => {
+      mounted = false
+      observer.disconnect()
     }
   }, [value])
   return (
@@ -707,8 +724,11 @@ export default function App() {
             <div className="eyebrow">
               МЕНЬШЕ БУМАГ · БОЛЬШЕ ВНИМАНИЯ ПАЦИЕНТУ
             </div>
-            <h1>Вы ведёте приём. Мы заполняем бланк.</h1>
-            <p>История под рукой, разговор превращается в готовый документ.</p>
+            <h1>Приём пациента</h1>
+            <p>
+              Начните запись. Разговор появится в центре, а сведения — в бланке
+              справа.
+            </p>
           </div>
           <div className="visit-actions">
             <button
@@ -776,8 +796,13 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <History size={19} />
-                <h2>История пациента</h2>
+                <span className="heading-icon">
+                  <History size={19} />
+                </span>
+                <span>
+                  <h2>История пациента</h2>
+                  <small>Прошлые приёмы и назначения</small>
+                </span>
               </div>
               <span className="count-badge">{history.length}</span>
             </header>
@@ -794,15 +819,17 @@ export default function App() {
               <div className="segmented">
                 <button
                   className={historyFilter === 'all' ? 'selected' : ''}
+                  aria-pressed={historyFilter === 'all'}
                   onClick={() => setHistoryFilter('all')}
                 >
                   Все записи
                 </button>
                 <button
                   className={historyFilter === 'related' ? 'selected' : ''}
+                  aria-pressed={historyFilter === 'related'}
                   onClick={() => setHistoryFilter('related')}
                 >
-                  По разговору <small>{related.length}</small>
+                  По теме <small>{related.length}</small>
                 </button>
               </div>
             </div>
@@ -812,10 +839,10 @@ export default function App() {
                   <div className="empty-icon">
                     <History size={26} />
                   </div>
-                  <h3>Вся история рядом</h3>
+                  <h3>Пока нет прошлых записей</h3>
                   <p>
-                    Прошлые консультации, анализы и рекомендации появятся здесь
-                    из подключённой истории.
+                    Добавьте предыдущую консультацию, чтобы видеть жалобы и
+                    назначения в контексте.
                   </p>
                   <button
                     className="text-button"
@@ -868,7 +895,7 @@ export default function App() {
                         <div className="past-recommendations">
                           <span>
                             <CheckCheck size={14} />
-                            Рекомендации тогда
+                            Прошлые рекомендации
                           </span>
                           {previousRecommendations(record).map((s) => (
                             <p key={s.id}>{s.text}</p>
@@ -928,7 +955,7 @@ export default function App() {
                 </span>
                 <span>
                   <h2>Разговор</h2>
-                  <small>Расшифровка в реальном времени</small>
+                  <small>Речь превращается в текст</small>
                 </span>
               </div>
               <div className="menu-anchor">
@@ -988,12 +1015,10 @@ export default function App() {
                       <span />
                       <span />
                     </div>
-                    <h3>Просто начните разговор</h3>
+                    <h3>Всё начинается с разговора</h3>
                     <p>
-                      Говорите с пациентом как обычно.
-                      <br />
-                      Расшифровка появится здесь, а бланк справа заполнится по
-                      её содержанию.
+                      Нажмите «Начать приём» внизу и говорите с пациентом как
+                      обычно. Мы запишем текст и поможем заполнить бланк.
                     </p>
                     <div className="automatic-note">
                       <Sparkles size={14} />
@@ -1211,7 +1236,7 @@ export default function App() {
                     'Начинайте запись с согласия пациента.'
                   ) : (
                     <button onClick={() => setDialog('connection')}>
-                      Микрофон готов к подключению сервера
+                      Распознавание не подключено · Подробнее
                     </button>
                   )}
                 </p>
@@ -1224,14 +1249,16 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <FileText size={20} />
+                <span className="heading-icon">
+                  <FileText size={20} />
+                </span>
                 <span>
                   <h2>Бланк консультации</h2>
-                  <small>По вашему шаблону Word</small>
+                  <small>Заполняется по ходу разговора</small>
                 </span>
               </div>
               <span
-                className={`document-status ${listening || ai.busy ? 'updating' : ''}`}
+                className={`document-status ${listening || ai.busy ? 'updating' : reviewed ? 'reviewed' : ''}`}
               >
                 {listening || ai.busy ? (
                   <>
@@ -1252,7 +1279,9 @@ export default function App() {
               <span>
                 <span className="word-icon">W</span>Осмотр терапевта / ВОП.docx
               </span>
-              <span>{filled}/13</span>
+              <span title="Разделы, в которых есть сведения">
+                {filled} из 13 разделов
+              </span>
             </div>
             <div className="document-scroll">
               <div className="paper">
@@ -1267,10 +1296,11 @@ export default function App() {
                   </div>
                   <button
                     className="metadata-toggle"
+                    aria-expanded={showDetails}
                     onClick={() => setShowDetails(!showDetails)}
                   >
                     <Pencil size={11} />
-                    Реквизиты документа
+                    Данные пациента и врача
                     <ChevronDown size={12} />
                   </button>
                   {showDetails && (
@@ -1438,9 +1468,15 @@ export default function App() {
               </details>
             </div>
             <footer className="document-footer">
-              <div className="engine-status">
+              <div className="engine-status" title={engineLabel}>
                 <Sparkles size={13} />
-                <span>{engineLabel}</span>
+                <span>
+                  {active || pendingProcessing
+                    ? 'Заполняем бланк по разговору'
+                    : filled
+                      ? 'Проверьте сведения перед выдачей'
+                      : 'Сведения появятся из разговора'}
+                </span>
                 {ai.busy && <LoaderCircle size={13} className="spin" />}
               </div>
               {ai.error && source === 'real' && (
@@ -1459,7 +1495,7 @@ export default function App() {
                     disabled={!canExport}
                     onChange={(e) => setReviewed(e.target.checked)}
                   />
-                  Бланк проверен, можно выдать пациенту
+                  Я проверил(а) бланк
                 </label>
               </div>
               <div className="export-actions">
@@ -1484,7 +1520,17 @@ export default function App() {
                   <Copy size={17} />
                 </button>
               </div>
-              <p>Откройте файл в Word и распечатайте</p>
+              <p className="export-hint">
+                {active
+                  ? 'Завершите запись, чтобы проверить и скачать бланк'
+                  : pendingProcessing
+                    ? 'Дождитесь обработки последних реплик'
+                    : !filled
+                      ? 'Сначала начните приём или откройте пример'
+                      : !reviewed
+                        ? 'Отметьте проверку — скачивание станет доступно'
+                        : 'Файл можно открыть и распечатать в Word'}
+              </p>
             </footer>
           </section>
         </div>
