@@ -1,0 +1,22 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "${MEDHUB_BIND_HOST:-127.0.0.1}:8000:8000"
+    environment:
+      MEDHUB_DEMO_ENABLED: "${MEDHUB_DEMO_ENABLED:-false}"
+      MEDHUB_DATA_DIR: /app/data
+      MEDHUB_CORS_ORIGINS: '${MEDHUB_CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}'
+    volumes:
+      - backend-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  backend-data:

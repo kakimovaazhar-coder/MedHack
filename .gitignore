@@ -8,3 +8,14 @@ __pycache__/
 *.py[cod]
 .DS_Store
 Thumbs.db
+.tools/
+.pytest_cache/
+.ruff_cache/
+data/
+*.sqlite3
+*.sqlite3-*
+*.egg-info/
+dist/
+build/
+coverage.xml
+.coverage
