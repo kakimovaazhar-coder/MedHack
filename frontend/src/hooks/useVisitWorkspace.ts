@@ -76,10 +76,12 @@ export function useVisitWorkspace(input: Input) {
       const abort = new AbortController()
       controller.current = abort
       const opts = { signal: abort.signal }
+      let attemptedKey = ''
       try {
         while (own === generation.current && latest.current.enabled) {
           const snapshot = latest.current
           const snapshotKey = fingerprint(snapshot)
+          attemptedKey = snapshotKey
           if (snapshotKey === done.current || !snapshot.segments.length) break
           let ws = remote.current
             ? await visitApi.get(remote.current.id, opts)
@@ -116,7 +118,10 @@ export function useVisitWorkspace(input: Input) {
               const same =
                 JSON.stringify(
                   existing.segments.map(({ speaker_id: _, ...s }) => s),
-                ) === JSON.stringify(record.segments)
+                ) ===
+                JSON.stringify(
+                  record.segments.map(({ speaker_id: _, ...s }) => s),
+                )
               if (!same)
                 ws = await visitApi.editRecord(ws, existing.id, record, opts)
             } else ws = await visitApi.addRecord(ws, record, opts)
@@ -146,6 +151,8 @@ export function useVisitWorkspace(input: Input) {
         if (own === generation.current) {
           worker.current = false
           setBusy(false)
+          if (attemptedKey && attemptedKey !== fingerprint(latest.current))
+            retry((n) => n + 1)
         }
       }
     }

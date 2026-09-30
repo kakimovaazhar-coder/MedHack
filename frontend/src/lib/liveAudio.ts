@@ -1,3 +1,5 @@
+import { ApiError, createMedHubClient } from './api'
+
 export const LIVE_SAMPLE_RATE = 16_000
 export const LIVE_CHUNK_SECONDS = 6
 export const LIVE_MAX_SECONDS = 30 * 60
@@ -101,6 +103,75 @@ export function placeLiveSegments(
     })
 }
 
+// Keep an accepted job attached to its queued audio so a retry resumes polling.
+const workspaceJobs = new WeakMap<
+  Blob,
+  { baseUrl: string; workspaceId: string; jobId: string }
+>()
+
+async function transcribeWorkspaceChunk(
+  blob: Blob,
+  language: LiveLanguage,
+  signal: AbortSignal,
+  baseUrl: string,
+): Promise<LiveTranscript> {
+  const client = createMedHubClient(baseUrl)
+  let pending = workspaceJobs.get(blob)
+  if (pending?.baseUrl !== baseUrl) pending = undefined
+  if (!pending) {
+    const workspace = await client.create({ signal })
+    try {
+      const job = await client.uploadAudio(
+        workspace,
+        blob,
+        {
+          title: 'Фрагмент текущего приёма',
+          kind: 'current',
+          language,
+        },
+        { signal },
+      )
+      pending = { baseUrl, workspaceId: workspace.id, jobId: job.id }
+      workspaceJobs.set(blob, pending)
+    } catch (error) {
+      await client.remove(workspace.id, { timeoutMs: 3000 }).catch(() => {})
+      throw error
+    }
+  }
+  try {
+    const workspace = await client.pollAudioJob(
+      pending.workspaceId,
+      pending.jobId,
+      {
+        signal,
+        timeoutMs: 55_000,
+      },
+    )
+    const job = workspace.jobs.find((item) => item.id === pending!.jobId)
+    const record = workspace.records.find((item) => item.id === job?.record_id)
+    if (!record)
+      throw new Error('Сервер не вернул запись распознанного фрагмента.')
+    workspaceJobs.delete(blob)
+    await client
+      .remove(pending.workspaceId, { timeoutMs: 3000 })
+      .catch(() => {})
+    return { language, segments: record.segments }
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      ['TRANSCRIPTION_FAILED', 'JOB_NOT_FOUND', 'WORKSPACE_NOT_FOUND'].includes(
+        error.code,
+      )
+    ) {
+      workspaceJobs.delete(blob)
+      await client
+        .remove(pending.workspaceId, { timeoutMs: 3000 })
+        .catch(() => {})
+    }
+    throw error
+  }
+}
+
 export async function transcribeLiveChunk(
   blob: Blob,
   language: LiveLanguage,
@@ -117,6 +188,8 @@ export async function transcribeLiveChunk(
       cache: 'no-store',
     },
   )
+  if (response.status === 404 || response.status === 405)
+    return transcribeWorkspaceChunk(blob, language, signal, baseUrl)
   const body = await response.json().catch(() => null)
   if (!response.ok) {
     throw new Error(

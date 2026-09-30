@@ -92,6 +92,72 @@ describe('live transcript placement', () => {
 })
 
 describe('live request contract', () => {
+  it('uses existing workspace audio endpoints when the streaming endpoint is absent', async () => {
+    const segment = {
+      id: 'utterance',
+      start: 0,
+      end: 2,
+      role: 'unknown',
+      text: 'Слабость',
+    }
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{}', { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'workspace', revision: 0 })),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: 'job', status: 'transcribing' })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            jobs: [{ id: 'job', status: 'completed', record_id: 'record' }],
+            records: [{ id: 'record', segments: [segment] }],
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetcher)
+    const blob = encodeWav(new Float32Array(160))
+    await expect(
+      transcribeLiveChunk(blob, 'auto', new AbortController().signal),
+    ).resolves.toEqual({ language: 'auto', segments: [segment] })
+    expect(fetcher.mock.calls[2][0]).toContain('/workspaces/workspace/audio?')
+    expect(fetcher.mock.calls[2][0]).toContain('language=auto')
+    expect(fetcher.mock.calls[2][1].body).toBe(blob)
+    expect(fetcher.mock.calls[4][1].method).toBe('DELETE')
+  })
+
+  it('resumes an accepted workspace job after a polling failure without uploading twice', async () => {
+    const response = (body: unknown) => new Response(JSON.stringify(body))
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{}', { status: 404 }))
+      .mockResolvedValueOnce(response({ id: 'workspace', revision: 0 }))
+      .mockResolvedValueOnce(response({ id: 'job' }))
+      .mockRejectedValueOnce(new TypeError('Network unavailable'))
+      .mockResolvedValueOnce(new Response('{}', { status: 404 }))
+      .mockResolvedValueOnce(
+        response({
+          jobs: [{ id: 'job', status: 'completed', record_id: 'record' }],
+          records: [{ id: 'record', segments: [] }],
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetcher)
+    const blob = new Blob()
+    const signal = new AbortController().signal
+    await expect(transcribeLiveChunk(blob, 'auto', signal)).rejects.toThrow()
+    await expect(transcribeLiveChunk(blob, 'auto', signal)).resolves.toEqual({
+      language: 'auto',
+      segments: [],
+    })
+    expect(
+      fetcher.mock.calls.filter(([url]) => url.includes('/audio?')),
+    ).toHaveLength(1)
+  })
+
   it('sends the complete WAV raw, forwards cancellation and accepts silence', async () => {
     const fetcher = vi
       .fn()

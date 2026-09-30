@@ -212,6 +212,7 @@ export default function App() {
         ...old,
         ...incoming.map((s) => ({
           ...s,
+          id: crypto.randomUUID(),
           start: s.start + offset.current,
           end: s.end + offset.current,
           final: true,
@@ -307,8 +308,11 @@ export default function App() {
       const response = await fetch(`${API_BASE}/live/capabilities`, {
         cache: 'no-store',
       })
-      if (!response.ok) throw new Error()
-      const caps = await response.json()
+      if (!response.ok && ![404, 405].includes(response.status))
+        throw new Error()
+      const caps = response.ok
+        ? await response.json()
+        : await visitApi.capabilities()
       setSpeechReady(caps.enabled && caps.speech === 'configured_unverified')
       setCapabilityError(false)
       return caps.enabled && caps.speech === 'configured_unverified'
@@ -688,9 +692,13 @@ export default function App() {
           <span className="online-dot" />
           Рабочее место врача
         </div>
-        <button className="privacy-button" onClick={() => setDialog('privacy')}>
+        <button
+          className="privacy-button"
+          aria-label="Об обработке данных"
+          onClick={() => setDialog('privacy')}
+        >
           <ShieldCheck size={17} />
-          <span>Конфиденциальный приём</span>
+          <span>Обработка данных</span>
         </button>
       </header>
       <main id="main">
