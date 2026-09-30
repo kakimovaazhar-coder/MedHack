@@ -7,7 +7,6 @@ import {
   Check,
   CheckCheck,
   ChevronDown,
-  Clock3,
   Copy,
   FilePlus2,
   FileText,
@@ -15,7 +14,6 @@ import {
   Info,
   LoaderCircle,
   Mic,
-  MoreHorizontal,
   Pause,
   Pencil,
   Play,
@@ -198,7 +196,6 @@ export default function App() {
   )
   const [historyFilter, setHistoryFilter] = useState<'all' | 'related'>('all')
   const [search, setSearch] = useState('')
-  const [menu, setMenu] = useState(false)
   const [reviewed, setReviewed] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -446,8 +443,12 @@ export default function App() {
     reset()
     setSource('demo')
     setHistory(DEMO_HISTORY.map((r) => ({ ...r })))
-    setDemo('playing')
+    setSegments(DEMO_SEGMENTS.map((segment) => ({ ...segment })))
+    setCursor({ index: DEMO_SEGMENTS.length, words: 0 })
+    setDemo('finished')
+    setFollowing(false)
     setPane('conversation')
+    requestAnimationFrame(() => scrollRef.current?.scrollTo({ top: 0 }))
   }
   function finishExample() {
     setSegments((old) =>
@@ -653,7 +654,6 @@ export default function App() {
   }
   function chooseAudio(kind: 'current' | 'history') {
     uploadKind.current = kind
-    setMenu(false)
     fileRef.current?.click()
   }
   async function exportWord() {
@@ -702,13 +702,17 @@ export default function App() {
             <Stethoscope size={24} />
           </span>
           <span>
-            MedScribe<small>АССИСТЕНТ ВРАЧА</small>
+            MedRep<small>АССИСТЕНТ ВРАЧА</small>
           </span>
         </a>
-        <div className="topbar-center">
-          <span className="online-dot" />
-          Рабочее место врача
-        </div>
+        <button
+          className="button quiet new-visit-button"
+          disabled={active || !!pending || live.pendingChunks > 0}
+          onClick={() => (hasContent ? setDialog('new') : reset())}
+        >
+          <Plus size={20} />
+          Новый приём
+        </button>
         <button
           className="privacy-button"
           aria-label="Об обработке данных"
@@ -720,49 +724,93 @@ export default function App() {
       </header>
       <main id="main">
         <div className="visit-heading">
-          <div>
-            <div className="eyebrow">
-              МЕНЬШЕ БУМАГ · БОЛЬШЕ ВНИМАНИЯ ПАЦИЕНТУ
-            </div>
-            <h1>Приём пациента</h1>
+          <div className="visit-intro">
+            <h1>
+              {active
+                ? 'Приём идёт'
+                : pendingProcessing && !ai.error
+                  ? 'Готовим бланк'
+                  : segments.length
+                    ? 'Проверьте бланк — и готово'
+                    : 'Начните приём одним нажатием'}
+            </h1>
             <p>
-              Начните запись. Разговор появится в центре, а сведения — в бланке
-              справа.
+              {active
+                ? 'Говорите с пациентом. Текст и бланк заполняются автоматически.'
+                : pendingProcessing && !ai.error
+                  ? 'Обрабатываем последние реплики. Подождите немного.'
+                  : segments.length
+                    ? 'Любую запись в бланке можно исправить. Затем скачайте Word.'
+                    : 'Говорите с пациентом. MedRep запишет разговор и заполнит бланк.'}
             </p>
           </div>
           <div className="visit-actions">
+            <div className="record-actions">
+              {active ? (
+                <>
+                  <button
+                    className="button secondary pause-button"
+                    disabled={
+                      uploading ||
+                      live.status === 'finishing' ||
+                      live.status === 'connecting'
+                    }
+                    onClick={pause}
+                  >
+                    {paused ? <Play size={17} /> : <Pause size={17} />}
+                    <span>{paused ? 'Продолжить' : 'Пауза'}</span>
+                  </button>
+                  <button
+                    className="button primary"
+                    disabled={
+                      uploading ||
+                      live.status === 'finishing' ||
+                      live.status === 'connecting'
+                    }
+                    onClick={() => void stop()}
+                  >
+                    {live.status === 'finishing' || uploading ? (
+                      <LoaderCircle size={17} className="spin" />
+                    ) : (
+                      <Square size={14} />
+                    )}
+                    Завершить запись
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="button primary start-button"
+                    disabled={!!pending || live.pendingChunks > 0}
+                    onClick={() => void start()}
+                  >
+                    <Mic size={18} />
+                    {segments.length && source !== 'demo'
+                      ? 'Продолжить запись'
+                      : 'Начать приём'}
+                  </button>
+                </>
+              )}
+            </div>
             <button
-              className="button secondary"
-              disabled={active}
+              className="button secondary demo-launch"
+              disabled={active || !!pending || live.pendingChunks > 0}
               onClick={() => (hasContent ? setDialog('example') : example())}
             >
-              <Play size={15} />
-              Пример приёма
-            </button>
-            <button
-              className="button quiet"
-              disabled={active || !!pending || live.pendingChunks > 0}
-              onClick={() => (hasContent ? setDialog('new') : reset())}
-            >
-              <Plus size={17} />
-              Новый приём
+              <Play size={20} />
+              Показать пример
             </button>
           </div>
         </div>
-        <div className="visit-strip">
-          <span>
-            <span className={`status-dot ${listening ? 'pulse' : ''}`} />
-            {status}
-          </span>
-          <span>
-            <Clock3 size={13} />
-            {displayDate(metadata.date)}
-          </span>
-          <span className="visit-strip-right">
-            Осмотр терапевта / ВОП
-            {source === 'demo' && <b className="demo-badge">ДЕМО</b>}
-          </span>
-        </div>
+        {source === 'demo' && (
+          <div className="demo-banner">
+            <Info size={18} />
+            <span>
+              <strong>Учебный пример.</strong> История, разговор и заполненный
+              бланк — все данные вымышлены.
+            </span>
+          </div>
+        )}
         <nav className="mobile-panes" aria-label="Рабочие панели">
           {(
             [
@@ -796,12 +844,12 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <span className="heading-icon">
-                  <History size={19} />
+                <span className="panel-number" aria-hidden="true">
+                  1
                 </span>
                 <span>
-                  <h2>История пациента</h2>
-                  <small>Прошлые приёмы и назначения</small>
+                  <h2>История</h2>
+                  <small>Прошлые записи пациента</small>
                 </span>
               </div>
               <span className="count-badge">{history.length}</span>
@@ -859,7 +907,7 @@ export default function App() {
                 <>
                   {source === 'demo' && (
                     <div className="history-demo-note">
-                      Синтетическая история для примера
+                      Записи учебного пациента
                     </div>
                   )}
                   {displayedHistory.length === 0 && (
@@ -950,41 +998,13 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <span className="heading-icon">
-                  <AudioLines size={20} />
+                <span className="panel-number" aria-hidden="true">
+                  2
                 </span>
                 <span>
                   <h2>Разговор</h2>
-                  <small>Речь превращается в текст</small>
+                  <small>Что говорят врач и пациент</small>
                 </span>
-              </div>
-              <div className="menu-anchor">
-                <button
-                  className="icon-button"
-                  aria-label="Добавить материалы"
-                  disabled={active || !!pending || live.pendingChunks > 0}
-                  onClick={() => setMenu(!menu)}
-                >
-                  <MoreHorizontal size={20} />
-                </button>
-                {menu && (
-                  <div className="dropdown">
-                    <button
-                      onClick={() => {
-                        setText('')
-                        setDialog('text')
-                        setMenu(false)
-                      }}
-                    >
-                      <FileText size={15} />
-                      Вставить текст
-                    </button>
-                    <button onClick={() => chooseAudio('current')}>
-                      <Upload size={15} />
-                      Загрузить аудио
-                    </button>
-                  </div>
-                )}
               </div>
             </header>
             <div className="conversation-status">
@@ -1017,7 +1037,7 @@ export default function App() {
                     </div>
                     <h3>Всё начинается с разговора</h3>
                     <p>
-                      Нажмите «Начать приём» внизу и говорите с пациентом как
+                      Нажмите «Начать приём» вверху и говорите с пациентом как
                       обычно. Мы запишем текст и поможем заполнить бланк.
                     </p>
                     <div className="automatic-note">
@@ -1095,7 +1115,7 @@ export default function App() {
                 </div>
               )}
             </div>
-            {!following && segments.length > 0 && (
+            {!following && segments.length > 0 && active && (
               <button
                 className="follow-button"
                 onClick={() => {
@@ -1168,61 +1188,26 @@ export default function App() {
                       : 'Микрофон выключен'}
                 </span>
               </div>
-              <div className="record-actions">
-                {active ? (
-                  <>
-                    <button
-                      className="button secondary pause-button"
-                      disabled={
-                        uploading ||
-                        live.status === 'finishing' ||
-                        live.status === 'connecting'
-                      }
-                      onClick={pause}
-                    >
-                      {paused ? <Play size={17} /> : <Pause size={17} />}
-                      <span>{paused ? 'Продолжить' : 'Пауза'}</span>
-                    </button>
-                    <button
-                      className="button primary"
-                      disabled={
-                        uploading ||
-                        live.status === 'finishing' ||
-                        live.status === 'connecting'
-                      }
-                      onClick={() => void stop()}
-                    >
-                      {live.status === 'finishing' || uploading ? (
-                        <LoaderCircle size={17} className="spin" />
-                      ) : (
-                        <Square size={14} />
-                      )}
-                      Завершить запись
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      className="button primary start-button"
-                      disabled={!!pending || live.pendingChunks > 0}
-                      onClick={() => void start()}
-                    >
-                      <Mic size={18} />
-                      {segments.length ? 'Продолжить запись' : 'Начать приём'}
-                    </button>
-                    <button
-                      className="button secondary"
-                      aria-label="Вставить текст разговора"
-                      disabled={!!pending || live.pendingChunks > 0}
-                      onClick={() => {
-                        setText('')
-                        setDialog('text')
-                      }}
-                    >
-                      <FileText size={18} />
-                    </button>
-                  </>
-                )}
+              <div className="conversation-imports">
+                <button
+                  className="text-button"
+                  disabled={active || !!pending || live.pendingChunks > 0}
+                  onClick={() => {
+                    setText('')
+                    setDialog('text')
+                  }}
+                >
+                  <FileText size={18} />
+                  Вставить текст
+                </button>
+                <button
+                  className="text-button"
+                  disabled={active || !!pending || live.pendingChunks > 0}
+                  onClick={() => chooseAudio('current')}
+                >
+                  <Upload size={18} />
+                  Загрузить аудио
+                </button>
               </div>
               {demoActive ? (
                 <button className="skip-demo" onClick={finishExample}>
@@ -1249,12 +1234,12 @@ export default function App() {
           >
             <header className="panel-heading">
               <div>
-                <span className="heading-icon">
-                  <FileText size={20} />
+                <span className="panel-number" aria-hidden="true">
+                  3
                 </span>
                 <span>
-                  <h2>Бланк консультации</h2>
-                  <small>Заполняется по ходу разговора</small>
+                  <h2>Бланк</h2>
+                  <small>Готовится автоматически</small>
                 </span>
               </div>
               <span
@@ -1275,14 +1260,6 @@ export default function App() {
                 )}
               </span>
             </header>
-            <div className="document-toolbar">
-              <span>
-                <span className="word-icon">W</span>Осмотр терапевта / ВОП.docx
-              </span>
-              <span title="Разделы, в которых есть сведения">
-                {filled} из 13 разделов
-              </span>
-            </div>
             <div className="document-scroll">
               <div className="paper">
                 <div className="paper-top">
@@ -1526,7 +1503,7 @@ export default function App() {
                   : pendingProcessing
                     ? 'Дождитесь обработки последних реплик'
                     : !filled
-                      ? 'Сначала начните приём или откройте пример'
+                      ? 'Начните приём или нажмите «Показать пример»'
                       : !reviewed
                         ? 'Отметьте проверку — скачивание станет доступно'
                         : 'Файл можно открыть и распечатать в Word'}
