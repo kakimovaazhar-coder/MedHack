@@ -1,0 +1,12 @@
+# Optional frontend overlay; preserves the team's existing backend configuration.
+# Run: docker compose -f compose.yaml -f compose.frontend.yaml up --build
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
